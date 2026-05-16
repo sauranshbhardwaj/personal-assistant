@@ -1,6 +1,6 @@
-# Personal SMS Health Reminder Assistant
+# Personal Telegram Health Reminder Assistant
 
-An MVP FastAPI backend for a personal SMS-based reminder assistant. It receives inbound Twilio SMS webhooks, parses plain-English reminder instructions, asks for confirmation, creates local reminder events, and sends outbound SMS reminders.
+An MVP FastAPI backend for a personal Telegram-based reminder assistant. It receives Telegram Bot API webhook updates, parses plain-English reminder instructions, asks for confirmation, creates local reminder events, and sends reminder messages back to your configured Telegram chat.
 
 This is a reminder-only system. It does not provide medical advice, dosage guidance, diagnosis, or medication safety recommendations. It only reminds and tracks information you explicitly enter.
 
@@ -22,10 +22,8 @@ This is a reminder-only system. It does not provide medical advice, dosage guida
 3. Configure environment variables:
 
    ```bash
-   export TWILIO_ACCOUNT_SID="your-account-sid"
-   export TWILIO_AUTH_TOKEN="your-auth-token"
-   export TWILIO_PHONE_NUMBER="+15551234567"
-   export MY_PHONE_NUMBER="+15557654321"
+   export TELEGRAM_BOT_TOKEN="1234567890:your_bot_token_from_botfather"
+   export TELEGRAM_CHAT_ID="123456789"
    export DATABASE_URL="sqlite:///./health_reminders.db"
    export NUDGE_INTERVAL_MINUTES=15
    export MAX_NUDGES=4
@@ -33,18 +31,58 @@ This is a reminder-only system. It does not provide medical advice, dosage guida
    export SUNDAY_GOAL_PROMPT_HOUR=18
    ```
 
-If Twilio credentials are missing, the app records outbound messages locally and logs them instead of sending real SMS.
+If `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` is missing, the app records outbound messages locally and logs them instead of sending real Telegram messages.
+
+## Create A Telegram Bot
+
+1. Open Telegram and search for `@BotFather`.
+2. Send:
+
+   ```text
+   /newbot
+   ```
+
+3. Follow BotFather's prompts for bot name and username.
+4. Copy the bot token BotFather returns. Use it as `TELEGRAM_BOT_TOKEN`.
+5. Open your new bot in Telegram and send it any message, such as:
+
+   ```text
+   hello
+   ```
+
+## Get Your TELEGRAM_CHAT_ID
+
+Before setting a webhook, ask Telegram for recent bot updates:
+
+```bash
+curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getUpdates"
+```
+
+Look for:
+
+```json
+"chat":{"id":123456789}
+```
+
+Use that value as:
+
+```bash
+export TELEGRAM_CHAT_ID="123456789"
+```
+
+If `getUpdates` returns no messages, send your bot another Telegram message and run the curl command again.
 
 ## Run Locally
 
 ```bash
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Useful local endpoints:
 
 - `GET /health`
-- `POST /twilio/inbound`
+- `POST /telegram/webhook`
+- `POST /telegram/set-webhook`
 - `POST /dev/send-test-reminder`
 - `GET /dev/today`
 
@@ -68,29 +106,33 @@ Copy the HTTPS forwarding URL, for example:
 https://abc123.ngrok-free.app
 ```
 
-Your Twilio webhook URL will be:
+Your Telegram webhook URL will be:
 
 ```text
-https://abc123.ngrok-free.app/twilio/inbound
+https://abc123.ngrok-free.app/telegram/webhook
 ```
 
-## Configure Twilio Inbound SMS
+## Set The Telegram Webhook
 
-1. Open the Twilio Console.
-2. Go to Phone Numbers, then Manage, then Active numbers.
-3. Select your Twilio phone number.
-4. Under Messaging, set "A message comes in" to:
+Option A: call Telegram directly:
 
-   ```text
-   https://abc123.ngrok-free.app/twilio/inbound
-   ```
+```bash
+curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://abc123.ngrok-free.app/telegram/webhook"}'
+```
 
-5. Use HTTP `POST`.
-6. Save the phone number configuration.
+Option B: use the local dev endpoint:
 
-TODO before exposing this beyond personal use: enable Twilio request signature verification on `/twilio/inbound`. The local MVP intentionally leaves this off for easier ngrok development.
+```bash
+curl -X POST "http://127.0.0.1:8000/telegram/set-webhook" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://abc123.ngrok-free.app/telegram/webhook"}'
+```
 
-## Example SMS Commands
+Each time your ngrok URL changes, set the Telegram webhook again.
+
+## Example Telegram Commands
 
 Create reminders:
 
@@ -128,3 +170,5 @@ Set weekly goal 2000 calories 170g protein
 - Confirmed reminders create reminder events for the next rolling 30 days.
 - Reminder events nudge every `NUDGE_INTERVAL_MINUTES` until you reply `DONE`, `SKIP`, `SNOOZE 10`, `SNOOZE 30`, or `MAX_NUDGES` is reached.
 - Done reminders use status `done`.
+- Telegram transport lives in `app/telegram_client.py`.
+- This local MVP does not include migrations yet. If you have an older `health_reminders.db`, delete it and restart the app so SQLite recreates the Telegram-only schema with `chat_id` columns.

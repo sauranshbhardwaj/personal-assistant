@@ -1,1 +1,1 @@
-"""Personal SMS health reminder assistant."""
+"""Personal Telegram health reminder assistant."""

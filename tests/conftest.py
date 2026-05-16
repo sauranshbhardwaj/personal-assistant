@@ -9,18 +9,18 @@ from app.config import Settings
 from app.db import Base
 
 
-class FakeSmsClient:
+class FakeTelegramClient:
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
 
-    def send_sms(self, to: str, body: str) -> None:
+    def send_message(self, to: str, body: str) -> None:
         self.sent.append((to, body))
 
 
 @pytest.fixture()
 def settings() -> Settings:
     return Settings(
-        my_phone_number="+15555550100",
+        telegram_chat_id="123456789",
         database_url="sqlite://",
         nudge_interval_minutes=15,
         max_nudges=4,
@@ -47,5 +47,5 @@ def db_session():
 
 
 @pytest.fixture()
-def fake_sms() -> FakeSmsClient:
-    return FakeSmsClient()
+def fake_telegram() -> FakeTelegramClient:
+    return FakeTelegramClient()

@@ -1,24 +1,24 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from app.handlers import HELP_TEXT, SmsHandler
+from app.handlers import HELP_TEXT, MessageHandler
 from app.models import DailyGoal, MealLog, PendingConfirmation, Reminder, ReminderEvent
 
 
-PHONE = "+15555550100"
+CHAT_ID = "123456789"
 
 
-def make_handler(db_session, fake_sms, settings) -> SmsHandler:
-    return SmsHandler(db_session, fake_sms, settings)
+def make_handler(db_session, fake_telegram, settings) -> MessageHandler:
+    return MessageHandler(db_session, fake_telegram, settings)
 
 
-def test_reminder_text_creates_pending_confirmation_with_fields(db_session, fake_sms, settings) -> None:
-    handler = make_handler(db_session, fake_sms, settings)
+def test_reminder_text_creates_pending_confirmation_with_fields(db_session, fake_telegram, settings) -> None:
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    response = handler.handle_inbound_sms(
-        PHONE,
+    response = handler.handle_inbound_message(
+        CHAT_ID,
         "Take Vitamin D 2000 IU every morning at 9 AM for 60 days",
     )
 
@@ -30,60 +30,62 @@ def test_reminder_text_creates_pending_confirmation_with_fields(db_session, fake
     assert "Frequency: every morning" in response
     assert "Reply YES to confirm or CANCEL to discard." in response
     assert db_session.query(PendingConfirmation).count() == 1
-    assert fake_sms.sent[-1] == (PHONE, response)
+    assert fake_telegram.sent[-1] == (CHAT_ID, response)
 
 
-def test_yes_confirms_latest_pending_and_creates_events(db_session, fake_sms, settings) -> None:
-    handler = make_handler(db_session, fake_sms, settings)
-    handler.handle_inbound_sms(PHONE, "Take antibiotic twice daily at 9 AM and 9 PM for 7 days")
+def test_yes_confirms_latest_pending_and_creates_events(db_session, fake_telegram, settings) -> None:
+    handler = make_handler(db_session, fake_telegram, settings)
+    handler.handle_inbound_message(CHAT_ID, "Take antibiotic twice daily at 9 AM and 9 PM for 7 days")
 
-    response = handler.handle_inbound_sms(PHONE, "YES")
+    response = handler.handle_inbound_message(CHAT_ID, "YES")
 
     reminder = db_session.query(Reminder).one()
     assert reminder.name == "antibiotic"
     assert reminder.status == "active"
     assert db_session.query(PendingConfirmation).filter_by(status="pending").count() == 0
-    assert db_session.query(ReminderEvent).count() == 14
+    events = db_session.query(ReminderEvent).all()
+    assert events
+    assert all(event.scheduled_at > datetime.utcnow() for event in events)
     assert "Confirmed antibiotic" in response
 
 
-def test_cancel_deletes_latest_pending_confirmation(db_session, fake_sms, settings) -> None:
-    handler = make_handler(db_session, fake_sms, settings)
-    handler.handle_inbound_sms(PHONE, "Take Vitamin D 2000 IU every morning at 9 AM")
+def test_cancel_deletes_latest_pending_confirmation(db_session, fake_telegram, settings) -> None:
+    handler = make_handler(db_session, fake_telegram, settings)
+    handler.handle_inbound_message(CHAT_ID, "Take Vitamin D 2000 IU every morning at 9 AM")
 
-    response = handler.handle_inbound_sms(PHONE, "CANCEL")
+    response = handler.handle_inbound_message(CHAT_ID, "CANCEL")
 
     assert response == "Canceled the latest pending reminder."
     assert db_session.query(PendingConfirmation).count() == 0
 
 
-def test_done_marks_latest_actionable_event_done(db_session, fake_sms, settings) -> None:
+def test_done_marks_latest_actionable_event_done(db_session, fake_telegram, settings) -> None:
     event = _create_event(db_session, status="sent")
-    handler = make_handler(db_session, fake_sms, settings)
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    response = handler.handle_inbound_sms(PHONE, "DONE")
+    response = handler.handle_inbound_message(CHAT_ID, "DONE")
 
     db_session.refresh(event)
     assert event.status == "done"
     assert response == "Marked done: magnesium."
 
 
-def test_skip_marks_latest_actionable_event_skipped(db_session, fake_sms, settings) -> None:
+def test_skip_marks_latest_actionable_event_skipped(db_session, fake_telegram, settings) -> None:
     event = _create_event(db_session, status="sent")
-    handler = make_handler(db_session, fake_sms, settings)
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    response = handler.handle_inbound_sms(PHONE, "SKIP")
+    response = handler.handle_inbound_message(CHAT_ID, "SKIP")
 
     db_session.refresh(event)
     assert event.status == "skipped"
     assert response == "Skipped: magnesium."
 
 
-def test_snooze_delays_latest_actionable_event(db_session, fake_sms, settings) -> None:
+def test_snooze_delays_latest_actionable_event(db_session, fake_telegram, settings) -> None:
     event = _create_event(db_session, status="sent")
-    handler = make_handler(db_session, fake_sms, settings)
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    response = handler.handle_inbound_sms(PHONE, "SNOOZE 10")
+    response = handler.handle_inbound_message(CHAT_ID, "SNOOZE 10")
 
     db_session.refresh(event)
     assert event.status == "snoozed"
@@ -91,27 +93,59 @@ def test_snooze_delays_latest_actionable_event(db_session, fake_sms, settings) -
     assert response == "Snoozed magnesium for 10 minutes."
 
 
-def test_today_lists_pending_sent_and_snoozed(db_session, fake_sms, settings) -> None:
+def test_done_does_not_complete_future_pending_event(db_session, fake_telegram, settings) -> None:
+    event = _create_event(
+        db_session,
+        status="pending",
+        scheduled_at=datetime.utcnow() + timedelta(hours=2),
+        due_at=datetime.utcnow() + timedelta(hours=2),
+    )
+    handler = make_handler(db_session, fake_telegram, settings)
+
+    response = handler.handle_inbound_message(CHAT_ID, "DONE")
+
+    db_session.refresh(event)
+    assert event.status == "pending"
+    assert response == "No active reminder event found. Text today to see reminders."
+
+
+def test_skip_can_handle_due_pending_event(db_session, fake_telegram, settings) -> None:
+    event = _create_event(
+        db_session,
+        status="pending",
+        scheduled_at=datetime.utcnow() - timedelta(minutes=1),
+        due_at=datetime.utcnow() - timedelta(minutes=1),
+    )
+    handler = make_handler(db_session, fake_telegram, settings)
+
+    response = handler.handle_inbound_message(CHAT_ID, "SKIP")
+
+    db_session.refresh(event)
+    assert event.status == "skipped"
+    assert response == "Skipped: magnesium."
+
+
+def test_today_lists_pending_sent_and_snoozed(db_session, fake_telegram, settings) -> None:
     _create_event(db_session, status="pending", name="Vitamin D")
     _create_event(db_session, status="sent", name="magnesium")
     _create_event(db_session, status="snoozed", name="antibiotic")
-    handler = make_handler(db_session, fake_sms, settings)
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    response = handler.handle_inbound_sms(PHONE, "today")
+    response = handler.handle_inbound_message(CHAT_ID, "today")
 
     assert "Pending: Vitamin D" in response
     assert "Sent: magnesium" in response
     assert "Snoozed: antibiotic" in response
 
 
-def test_summary_includes_done_missed_and_meal_totals(db_session, fake_sms, settings) -> None:
+def test_summary_includes_done_missed_and_meal_totals(db_session, fake_telegram, settings) -> None:
     _create_event(db_session, status="done", name="Vitamin D")
     _create_event(db_session, status="missed", name="magnesium")
-    db_session.add(MealLog(phone_number=PHONE, calories=650, protein_grams=45))
+    db_session.add(MealLog(chat_id=CHAT_ID, calories=650, protein_grams=45))
     db_session.commit()
-    handler = make_handler(db_session, fake_sms, settings)
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    response = handler.handle_inbound_sms(PHONE, "summary")
+    response = handler.handle_inbound_message(CHAT_ID, "summary")
 
     assert "Done reminders: Vitamin D" in response
     assert "Missed reminders: magnesium" in response
@@ -119,10 +153,10 @@ def test_summary_includes_done_missed_and_meal_totals(db_session, fake_sms, sett
     assert "Protein: 45g" in response
 
 
-def test_help_command_lists_available_commands(db_session, fake_sms, settings) -> None:
-    handler = make_handler(db_session, fake_sms, settings)
+def test_help_command_lists_available_commands(db_session, fake_telegram, settings) -> None:
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    response = handler.handle_inbound_sms(PHONE, "help")
+    response = handler.handle_inbound_message(CHAT_ID, "help")
 
     assert response == HELP_TEXT
     assert "SNOOZE 10" in response
@@ -130,20 +164,20 @@ def test_help_command_lists_available_commands(db_session, fake_sms, settings) -
     assert "Log meal 650 calories 45g protein" in response
 
 
-def test_unknown_message_gets_helpful_fallback(db_session, fake_sms, settings) -> None:
-    handler = make_handler(db_session, fake_sms, settings)
+def test_unknown_message_gets_helpful_fallback(db_session, fake_telegram, settings) -> None:
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    response = handler.handle_inbound_sms(PHONE, "Should I change my medication?")
+    response = handler.handle_inbound_message(CHAT_ID, "Should I change my medication?")
 
     assert "I could not understand that yet." in response
     assert "Text HELP" in response
 
 
-def test_meal_and_goal_commands_store_records(db_session, fake_sms, settings) -> None:
-    handler = make_handler(db_session, fake_sms, settings)
+def test_meal_and_goal_commands_store_records(db_session, fake_telegram, settings) -> None:
+    handler = make_handler(db_session, fake_telegram, settings)
 
-    meal_response = handler.handle_inbound_sms(PHONE, "Log meal 650 calories 45g protein")
-    goal_response = handler.handle_inbound_sms(PHONE, "Set weekly goal 2000 calories 170g protein")
+    meal_response = handler.handle_inbound_message(CHAT_ID, "Log meal 650 calories 45g protein")
+    goal_response = handler.handle_inbound_message(CHAT_ID, "Set weekly goal 2000 calories 170g protein")
 
     assert meal_response == "Logged meal: 650 calories, 45g protein."
     assert goal_response == "Set goal: 2000 calories, 170g protein."
@@ -151,9 +185,15 @@ def test_meal_and_goal_commands_store_records(db_session, fake_sms, settings) ->
     assert db_session.query(DailyGoal).count() == 1
 
 
-def _create_event(db_session, status: str, name: str = "magnesium") -> ReminderEvent:
+def _create_event(
+    db_session,
+    status: str,
+    name: str = "magnesium",
+    scheduled_at: datetime | None = None,
+    due_at: datetime | None = None,
+) -> ReminderEvent:
     reminder = Reminder(
-        phone_number=PHONE,
+        chat_id=CHAT_ID,
         category="supplement",
         name=name,
         dosage="400mg" if name == "magnesium" else None,
@@ -168,9 +208,9 @@ def _create_event(db_session, status: str, name: str = "magnesium") -> ReminderE
     db_session.refresh(reminder)
     event = ReminderEvent(
         reminder_id=reminder.id,
-        phone_number=PHONE,
-        scheduled_at=datetime.utcnow(),
-        due_at=datetime.utcnow(),
+        chat_id=CHAT_ID,
+        scheduled_at=scheduled_at or datetime.utcnow(),
+        due_at=due_at or datetime.utcnow(),
         sent_at=datetime.utcnow() if status == "sent" else None,
         status=status,
     )

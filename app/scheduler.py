@@ -4,13 +4,13 @@ import json
 from datetime import date, datetime, time, timedelta, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import and_, func, or_
+from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.models import DailyGoal, MealLog, Reminder, ReminderEvent, utc_now
-from app.twilio_client import SmsClient, get_sms_client, send_sms_and_record
+from app.telegram_client import MessageClient, get_message_client, send_message_and_record
 
 EVENT_HORIZON_DAYS = 30
 
@@ -20,11 +20,18 @@ def create_reminder_events(
     reminder: Reminder,
     settings: Settings,
     horizon_days: int = EVENT_HORIZON_DAYS,
+    now: datetime | None = None,
 ) -> int:
-    times = json.loads(reminder.times_json)
-    today = datetime.now(settings.timezone).date()
+    times = [time.fromisoformat(time_value) for time_value in json.loads(reminder.times_json)]
+    now_local = _as_utc(now or utc_now()).astimezone(settings.timezone)
+    now_utc = _to_utc_naive(now_local)
+    today = now_local.date()
     start = max(reminder.start_date, today)
-    horizon_end = today + timedelta(days=horizon_days - 1)
+
+    if start == today and _all_times_have_passed_today(times, now_local):
+        start += timedelta(days=1)
+
+    horizon_end = start + timedelta(days=horizon_days - 1)
     end = min(reminder.end_date or horizon_end, horizon_end)
     if end < start:
         return 0
@@ -32,10 +39,11 @@ def create_reminder_events(
     created = 0
     current = start
     while current <= end:
-        for time_value in times:
-            local_time = time.fromisoformat(time_value)
+        for local_time in times:
             local_dt = datetime.combine(current, local_time, tzinfo=settings.timezone)
             scheduled_at = _to_utc_naive(local_dt)
+            if scheduled_at <= now_utc:
+                continue
             exists = (
                 db.query(ReminderEvent)
                 .filter(
@@ -49,7 +57,7 @@ def create_reminder_events(
             db.add(
                 ReminderEvent(
                     reminder_id=reminder.id,
-                    phone_number=reminder.phone_number,
+                    chat_id=reminder.chat_id,
                     scheduled_at=scheduled_at,
                     due_at=scheduled_at,
                     status="pending",
@@ -76,7 +84,7 @@ def replenish_reminder_events(
 def send_due_reminders(
     db: Session,
     settings: Settings,
-    sms_client: SmsClient,
+    message_client: MessageClient,
     now: datetime | None = None,
 ) -> int:
     now = _to_utc_naive(now or utc_now())
@@ -92,7 +100,7 @@ def send_due_reminders(
         .all()
     )
     for event in due_events:
-        send_sms_and_record(db, sms_client, event.phone_number, _reminder_sms(event))
+        send_message_and_record(db, message_client, event.chat_id, _reminder_message(event))
         event.status = "sent"
         event.sent_at = now
         event.last_nudged_at = now
@@ -113,7 +121,7 @@ def send_due_reminders(
         if event.nudge_count >= settings.max_nudges:
             event.status = "missed"
             continue
-        send_sms_and_record(db, sms_client, event.phone_number, _nudge_sms(event))
+        send_message_and_record(db, message_client, event.chat_id, _nudge_message(event))
         event.last_nudged_at = now
         event.nudge_count += 1
         sent_count += 1
@@ -125,38 +133,38 @@ def send_due_reminders(
 def send_daily_summaries(
     db: Session,
     settings: Settings,
-    sms_client: SmsClient,
+    message_client: MessageClient,
 ) -> int:
-    phone_number = settings.my_phone_number
-    if not phone_number:
+    chat_id = settings.telegram_chat_id
+    if not chat_id:
         return 0
-    body = render_summary(db, phone_number, settings)
-    send_sms_and_record(db, sms_client, phone_number, body)
+    body = render_summary(db, chat_id, settings)
+    send_message_and_record(db, message_client, chat_id, body)
     return 1
 
 
 def send_sunday_goal_prompt(
     db: Session,
     settings: Settings,
-    sms_client: SmsClient,
+    message_client: MessageClient,
 ) -> int:
-    phone_number = settings.my_phone_number
-    if not phone_number:
+    chat_id = settings.telegram_chat_id
+    if not chat_id:
         return 0
     body = (
         "Weekly goal check-in: text your target like "
         "'Set weekly goal 2000 calories 170g protein'."
     )
-    send_sms_and_record(db, sms_client, phone_number, body)
+    send_message_and_record(db, message_client, chat_id, body)
     return 1
 
 
-def render_summary(db: Session, phone_number: str, settings: Settings) -> str:
+def render_summary(db: Session, chat_id: str, settings: Settings) -> str:
     start_utc, end_utc = _local_day_bounds(settings)
-    done_events = _events_for_statuses(db, phone_number, start_utc, end_utc, ["done"])
-    missed_events = _events_for_statuses(db, phone_number, start_utc, end_utc, ["missed"])
-    calories, protein = _meal_totals(db, phone_number, start_utc, end_utc)
-    goal = _active_goal(db, phone_number)
+    done_events = _events_for_statuses(db, chat_id, start_utc, end_utc, ["done"])
+    missed_events = _events_for_statuses(db, chat_id, start_utc, end_utc, ["missed"])
+    calories, protein = _meal_totals(db, chat_id, start_utc, end_utc)
+    goal = _active_goal(db, chat_id)
 
     lines = [
         "Today's summary:",
@@ -170,11 +178,11 @@ def render_summary(db: Session, phone_number: str, settings: Settings) -> str:
     return "\n".join(lines)
 
 
-def render_today_status(db: Session, phone_number: str, settings: Settings) -> str:
+def render_today_status(db: Session, chat_id: str, settings: Settings) -> str:
     start_utc, end_utc = _local_day_bounds(settings)
-    pending = _events_for_statuses(db, phone_number, start_utc, end_utc, ["pending"])
-    sent = _events_for_statuses(db, phone_number, start_utc, end_utc, ["sent"])
-    snoozed = _events_for_statuses(db, phone_number, start_utc, end_utc, ["snoozed"])
+    pending = _events_for_statuses(db, chat_id, start_utc, end_utc, ["pending"])
+    sent = _events_for_statuses(db, chat_id, start_utc, end_utc, ["sent"])
+    snoozed = _events_for_statuses(db, chat_id, start_utc, end_utc, ["snoozed"])
     return "\n".join(
         [
             "Today's reminders:",
@@ -185,16 +193,16 @@ def render_today_status(db: Session, phone_number: str, settings: Settings) -> s
     )
 
 
-def build_today_payload(db: Session, phone_number: str, settings: Settings) -> dict:
+def build_today_payload(db: Session, chat_id: str, settings: Settings) -> dict:
     start_utc, end_utc = _local_day_bounds(settings)
-    calories, protein = _meal_totals(db, phone_number, start_utc, end_utc)
+    calories, protein = _meal_totals(db, chat_id, start_utc, end_utc)
     return {
         "reminders": [
             _event_payload(event, settings)
             for event in (
                 db.query(ReminderEvent)
                 .filter(
-                    ReminderEvent.phone_number == phone_number,
+                    ReminderEvent.chat_id == chat_id,
                     ReminderEvent.scheduled_at >= start_utc,
                     ReminderEvent.scheduled_at < end_utc,
                 )
@@ -210,16 +218,16 @@ def build_today_payload(db: Session, phone_number: str, settings: Settings) -> d
 def send_test_reminder(
     db: Session,
     settings: Settings,
-    sms_client: SmsClient,
+    message_client: MessageClient,
     name: str = "test reminder",
 ) -> ReminderEvent:
-    if not settings.my_phone_number:
-        raise ValueError("MY_PHONE_NUMBER is required for dev test reminders")
+    if not settings.telegram_chat_id:
+        raise ValueError("TELEGRAM_CHAT_ID is required for dev test reminders")
 
     now = utc_now()
     local_now = _as_utc(now).astimezone(settings.timezone)
     reminder = Reminder(
-        phone_number=settings.my_phone_number,
+        chat_id=settings.telegram_chat_id,
         category="general",
         name=name,
         dosage=None,
@@ -236,7 +244,7 @@ def send_test_reminder(
 
     event = ReminderEvent(
         reminder_id=reminder.id,
-        phone_number=settings.my_phone_number,
+        chat_id=settings.telegram_chat_id,
         scheduled_at=now,
         due_at=now,
         status="pending",
@@ -244,7 +252,7 @@ def send_test_reminder(
     db.add(event)
     db.commit()
     db.refresh(event)
-    send_due_reminders(db, settings, sms_client, now=now)
+    send_due_reminders(db, settings, message_client, now=now)
     db.refresh(event)
     return event
 
@@ -252,10 +260,10 @@ def send_test_reminder(
 def create_scheduler(
     settings: Settings | None = None,
     session_factory: sessionmaker[Session] = SessionLocal,
-    sms_client: SmsClient | None = None,
+    message_client: MessageClient | None = None,
 ) -> BackgroundScheduler:
     settings = settings or get_settings()
-    sms_client = sms_client or get_sms_client()
+    message_client = message_client or get_message_client()
     scheduler = BackgroundScheduler(timezone=settings.timezone)
 
     def with_db(fn):
@@ -266,7 +274,7 @@ def create_scheduler(
             db.close()
 
     scheduler.add_job(
-        lambda: with_db(lambda db: send_due_reminders(db, settings, sms_client)),
+        lambda: with_db(lambda db: send_due_reminders(db, settings, message_client)),
         "interval",
         minutes=1,
         id="send-due-reminders",
@@ -281,7 +289,7 @@ def create_scheduler(
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: with_db(lambda db: send_daily_summaries(db, settings, sms_client)),
+        lambda: with_db(lambda db: send_daily_summaries(db, settings, message_client)),
         "cron",
         hour=settings.daily_summary_hour,
         minute=0,
@@ -289,7 +297,7 @@ def create_scheduler(
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: with_db(lambda db: send_sunday_goal_prompt(db, settings, sms_client)),
+        lambda: with_db(lambda db: send_sunday_goal_prompt(db, settings, message_client)),
         "cron",
         day_of_week="sun",
         hour=settings.sunday_goal_prompt_hour,
@@ -300,7 +308,7 @@ def create_scheduler(
     return scheduler
 
 
-def _reminder_sms(event: ReminderEvent) -> str:
+def _reminder_message(event: ReminderEvent) -> str:
     reminder = event.reminder
     dosage = f" {reminder.dosage}" if reminder.dosage else ""
     return (
@@ -309,8 +317,8 @@ def _reminder_sms(event: ReminderEvent) -> str:
     )
 
 
-def _nudge_sms(event: ReminderEvent) -> str:
-    return f"Nudge {event.nudge_count + 1}: {_reminder_sms(event)}"
+def _nudge_message(event: ReminderEvent) -> str:
+    return f"Nudge {event.nudge_count + 1}: {_reminder_message(event)}"
 
 
 def _local_day_bounds(settings: Settings, target_date: date | None = None) -> tuple[datetime, datetime]:
@@ -320,9 +328,15 @@ def _local_day_bounds(settings: Settings, target_date: date | None = None) -> tu
     return _to_utc_naive(local_start), _to_utc_naive(local_end)
 
 
+def _all_times_have_passed_today(times: list[time], now_local: datetime) -> bool:
+    if not times:
+        return False
+    return all(local_time <= now_local.time() for local_time in times)
+
+
 def _events_for_statuses(
     db: Session,
-    phone_number: str,
+    chat_id: str,
     start_utc: datetime,
     end_utc: datetime,
     statuses: list[str],
@@ -330,7 +344,7 @@ def _events_for_statuses(
     return (
         db.query(ReminderEvent)
         .filter(
-            ReminderEvent.phone_number == phone_number,
+            ReminderEvent.chat_id == chat_id,
             ReminderEvent.scheduled_at >= start_utc,
             ReminderEvent.scheduled_at < end_utc,
             ReminderEvent.status.in_(statuses),
@@ -346,7 +360,7 @@ def _event_names(events: list[ReminderEvent]) -> str:
 
 def _meal_totals(
     db: Session,
-    phone_number: str,
+    chat_id: str,
     start_utc: datetime,
     end_utc: datetime,
 ) -> tuple[int, int]:
@@ -356,7 +370,7 @@ def _meal_totals(
             func.coalesce(func.sum(MealLog.protein_grams), 0),
         )
         .filter(
-            MealLog.phone_number == phone_number,
+            MealLog.chat_id == chat_id,
             MealLog.logged_at >= start_utc,
             MealLog.logged_at < end_utc,
         )
@@ -365,10 +379,10 @@ def _meal_totals(
     return int(calories), int(protein)
 
 
-def _active_goal(db: Session, phone_number: str) -> DailyGoal | None:
+def _active_goal(db: Session, chat_id: str) -> DailyGoal | None:
     return (
         db.query(DailyGoal)
-        .filter(DailyGoal.phone_number == phone_number, DailyGoal.active.is_(True))
+        .filter(DailyGoal.chat_id == chat_id, DailyGoal.active.is_(True))
         .order_by(DailyGoal.created_at.desc())
         .first()
     )

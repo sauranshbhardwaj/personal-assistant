@@ -2,17 +2,16 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from urllib.parse import parse_qs
 
 from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.db import get_db, init_db
-from app.handlers import SmsHandler
+from app.handlers import MessageHandler
 from app.scheduler import build_today_payload, create_scheduler, send_test_reminder
-from app.twilio_client import SmsClient, get_sms_client
+from app.telegram_client import MessageClient, TelegramMessageClient, get_message_client
 
 
 def create_app(
@@ -40,7 +39,7 @@ def create_app(
                 scheduler.shutdown(wait=False)
 
     app = FastAPI(
-        title="Personal SMS Health Reminder Assistant",
+        title="Personal Telegram Health Reminder Assistant",
         lifespan=lifespan,
     )
 
@@ -48,30 +47,48 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/twilio/inbound")
-    async def twilio_inbound(
+    @app.post("/telegram/webhook")
+    async def telegram_webhook(
         request: Request,
         db: Session = Depends(get_db),
-        sms_client: SmsClient = Depends(get_sms_client),
-    ) -> Response:
-        # TODO: Verify Twilio request signatures before exposing this beyond
-        # personal/local use.
-        payload = await _read_twilio_payload(request)
-        phone_number = payload.get("From", "")
-        body = payload.get("Body", "")
-        handler = SmsHandler(db, sms_client, settings)
-        handler.handle_inbound_sms(phone_number, body)
-        return Response("<Response></Response>", media_type="application/xml")
+        message_client: MessageClient = Depends(get_message_client),
+    ) -> JSONResponse:
+        payload = await request.json()
+        message = _extract_telegram_text(payload)
+        if message is None:
+            return JSONResponse({"ok": True, "ignored": True})
+
+        chat_id, body = message
+        handler = MessageHandler(db, message_client, settings)
+        handler.handle_inbound_message(chat_id, body)
+        return JSONResponse({"ok": True})
+
+    @app.post("/telegram/set-webhook")
+    async def telegram_set_webhook(
+        request: Request,
+        message_client: TelegramMessageClient = Depends(get_message_client),
+    ) -> JSONResponse:
+        payload = await _read_optional_json(request)
+        webhook_url = str(payload.get("url") or "").strip()
+        if not webhook_url:
+            webhook_url = f"{str(request.base_url).rstrip('/')}/telegram/webhook"
+
+        try:
+            result = message_client.set_webhook(webhook_url)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        return JSONResponse({"webhook_url": webhook_url, "telegram": result})
 
     @app.post("/dev/send-test-reminder")
     async def dev_send_test_reminder(
         request: Request,
         db: Session = Depends(get_db),
-        sms_client: SmsClient = Depends(get_sms_client),
+        message_client: MessageClient = Depends(get_message_client),
     ) -> JSONResponse:
         payload = await _read_optional_json(request)
         name = str(payload.get("name") or "test reminder")
-        event = send_test_reminder(db, settings, sms_client, name=name)
+        event = send_test_reminder(db, settings, message_client, name=name)
         return JSONResponse(
             {
                 "event_id": event.id,
@@ -82,22 +99,28 @@ def create_app(
 
     @app.get("/dev/today")
     def dev_today(db: Session = Depends(get_db)) -> JSONResponse:
-        if not settings.my_phone_number:
-            return JSONResponse({"error": "MY_PHONE_NUMBER is not configured"}, status_code=400)
-        return JSONResponse(build_today_payload(db, settings.my_phone_number, settings))
+        if not settings.telegram_chat_id:
+            return JSONResponse({"error": "TELEGRAM_CHAT_ID is not configured"}, status_code=400)
+        return JSONResponse(build_today_payload(db, settings.telegram_chat_id, settings))
 
     return app
 
 
-async def _read_twilio_payload(request: Request) -> dict[str, str]:
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        raw_json = await request.json()
-        return {str(key): str(value) for key, value in raw_json.items()}
+def _extract_telegram_text(payload: dict) -> tuple[str, str] | None:
+    message = payload.get("message") or payload.get("edited_message")
+    if not isinstance(message, dict):
+        return None
 
-    raw_body = (await request.body()).decode("utf-8")
-    parsed = parse_qs(raw_body)
-    return {key: values[0] if values else "" for key, values in parsed.items()}
+    chat = message.get("chat")
+    text = message.get("text")
+    if not isinstance(chat, dict) or text is None:
+        return None
+
+    chat_id = chat.get("id")
+    if chat_id is None:
+        return None
+
+    return str(chat_id), str(text)
 
 
 async def _read_optional_json(request: Request) -> dict:

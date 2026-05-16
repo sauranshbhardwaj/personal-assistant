@@ -16,7 +16,7 @@ class Reminder(Base):
     __tablename__ = "reminders"
 
     id = Column(Integer, primary_key=True)
-    phone_number = Column(String(32), nullable=False, index=True)
+    chat_id = Column(String(64), nullable=False, index=True)
     category = Column(String(32), nullable=False)
     name = Column(String(255), nullable=False)
     dosage = Column(String(255), nullable=True)
@@ -39,7 +39,7 @@ class ReminderEvent(Base):
 
     id = Column(Integer, primary_key=True)
     reminder_id = Column(Integer, ForeignKey("reminders.id"), nullable=False, index=True)
-    phone_number = Column(String(32), nullable=False, index=True)
+    chat_id = Column(String(64), nullable=False, index=True)
     scheduled_at = Column(DateTime(timezone=True), nullable=False, index=True)
     due_at = Column(DateTime(timezone=True), nullable=False, index=True)
     sent_at = Column(DateTime(timezone=True), nullable=True)
@@ -58,7 +58,7 @@ class Message(Base):
     __tablename__ = "messages"
 
     id = Column(Integer, primary_key=True)
-    phone_number = Column(String(32), nullable=False, index=True)
+    chat_id = Column(String(64), nullable=False, index=True)
     direction = Column(String(16), nullable=False)
     body = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
@@ -68,7 +68,7 @@ class MealLog(Base):
     __tablename__ = "meal_logs"
 
     id = Column(Integer, primary_key=True)
-    phone_number = Column(String(32), nullable=False, index=True)
+    chat_id = Column(String(64), nullable=False, index=True)
     calories = Column(Integer, nullable=False)
     protein_grams = Column(Integer, nullable=False)
     logged_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
@@ -78,7 +78,7 @@ class DailyGoal(Base):
     __tablename__ = "daily_goals"
 
     id = Column(Integer, primary_key=True)
-    phone_number = Column(String(32), nullable=False, index=True)
+    chat_id = Column(String(64), nullable=False, index=True)
     calories = Column(Integer, nullable=False)
     protein_grams = Column(Integer, nullable=False)
     effective_date = Column(Date, nullable=False, default=date.today)
@@ -90,7 +90,7 @@ class PendingConfirmation(Base):
     __tablename__ = "pending_confirmations"
 
     id = Column(Integer, primary_key=True)
-    phone_number = Column(String(32), nullable=False, index=True)
+    chat_id = Column(String(64), nullable=False, index=True)
     raw_text = Column(Text, nullable=False)
     parsed_payload = Column(Text, nullable=False)
     status = Column(String(32), nullable=False, default="pending", index=True)
