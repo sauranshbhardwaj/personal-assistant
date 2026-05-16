@@ -53,8 +53,29 @@ def test_parse_meal_log() -> None:
 
     assert parsed.kind == "meal_log"
     assert parsed.meal_log is not None
+    assert parsed.meal_log.meal_type == "meal"
     assert parsed.meal_log.calories == 650
     assert parsed.meal_log.protein_grams == 45
+
+
+def test_parse_typed_meal_logs() -> None:
+    lunch = parse_message("Log lunch 650 calories 45g protein", today=TODAY)
+    breakfast = parse_message("Log breakfast 500 calories 35g protein", today=TODAY)
+    snack = parse_message("Log snack 250 calories 20g protein", today=TODAY)
+    dinner = parse_message("Log dinner 700 calories 50g protein", today=TODAY)
+    colon_lunch = parse_message("Lunch: 650 calories, 45g protein", today=TODAY)
+
+    assert lunch.kind == "meal_log"
+    assert lunch.meal_log is not None
+    assert lunch.meal_log.meal_type == "lunch"
+    assert breakfast.meal_log is not None
+    assert breakfast.meal_log.meal_type == "breakfast"
+    assert snack.meal_log is not None
+    assert snack.meal_log.meal_type == "snack"
+    assert dinner.meal_log is not None
+    assert dinner.meal_log.meal_type == "dinner"
+    assert colon_lunch.meal_log is not None
+    assert colon_lunch.meal_log.meal_type == "lunch"
 
 
 def test_parse_weekly_goal() -> None:

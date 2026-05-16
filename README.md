@@ -160,8 +160,34 @@ Diet MVP:
 
 ```text
 Log meal 650 calories 45g protein
+Log lunch 650 calories 45g protein
+Lunch: 650 calories, 45g protein
+Log breakfast 500 calories 35g protein
+Log snack 250 calories 20g protein
+Log dinner 700 calories 50g protein
 Set weekly goal 2000 calories 170g protein
 ```
+
+The everyday meal types are `breakfast`, `lunch`, `snack`, and `dinner`. Generic `Log meal ...` still works for quick logging, but only `lunch` triggers the Omega 3 reminder.
+
+## Seed Your Predecided Reminders
+
+After `TELEGRAM_CHAT_ID` is configured, load the predecided active reminders with:
+
+```bash
+python -m app.seed_reminders
+```
+
+The seed is idempotent, so rerunning it updates the same reminder records and does not duplicate reminder events. It creates active reminders for Halovate Cream, Momrazone Cream, Adhydra Lotion, Uprise D3 Tablet, Creatine, Whey Protein, and Omega 3 Tablet. Uprise D3 is seeded for Sundays at `09:00` because the source reminder did not include an exact time.
+
+Omega 3 Tablet is stored as an active reminder without fixed-time events. It triggers only once per day when you log lunch macros, for example:
+
+```text
+Log lunch 650 calories 45g protein
+Lunch: 650 calories, 45g protein
+```
+
+Breakfast, dinner, snack, and generic meal logs do not trigger the Omega 3 reminder.
 
 ## Behavior Notes
 
@@ -171,4 +197,4 @@ Set weekly goal 2000 calories 170g protein
 - Reminder events nudge every `NUDGE_INTERVAL_MINUTES` until you reply `DONE`, `SKIP`, `SNOOZE 10`, `SNOOZE 30`, or `MAX_NUDGES` is reached.
 - Done reminders use status `done`.
 - Telegram transport lives in `app/telegram_client.py`.
-- This local MVP does not include migrations yet. If you have an older `health_reminders.db`, delete it and restart the app so SQLite recreates the Telegram-only schema with `chat_id` columns.
+- This local MVP does not include full migrations yet. If you see a schema error with an older `health_reminders.db`, stop the app, delete `health_reminders.db`, and restart so SQLite recreates the current Telegram-only schema with `chat_id` and meal type columns.

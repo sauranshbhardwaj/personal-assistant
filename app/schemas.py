@@ -20,6 +20,7 @@ class ParsedReminder(BaseModel):
 class ParsedMealLog(BaseModel):
     calories: int
     protein_grams: int
+    meal_type: Literal["meal", "breakfast", "lunch", "dinner", "snack"] = "meal"
 
 
 class ParsedDailyGoal(BaseModel):

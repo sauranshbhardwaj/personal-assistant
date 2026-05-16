@@ -12,7 +12,9 @@ DOSAGE_RE = re.compile(
     re.IGNORECASE,
 )
 MEAL_RE = re.compile(
-    r"^log meal\s+(\d+)\s*(?:cal|calories)\s+(\d+)\s*g\s*protein$",
+    r"^(?:log\s+)?(?P<meal_type>meal|breakfast|lunch|dinner|snack)\s*:?\s+"
+    r"(?P<calories>\d+)\s*(?:cal|calories)\s*,?\s*"
+    r"(?P<protein>\d+)\s*g\s*protein$",
     re.IGNORECASE,
 )
 GOAL_RE = re.compile(
@@ -51,8 +53,9 @@ def parse_message(text: str, today: date | None = None) -> ParsedCommand:
         return ParsedCommand(
             kind="meal_log",
             meal_log=ParsedMealLog(
-                calories=int(meal_match.group(1)),
-                protein_grams=int(meal_match.group(2)),
+                calories=int(meal_match.group("calories")),
+                protein_grams=int(meal_match.group("protein")),
+                meal_type=meal_match.group("meal_type").lower(),
             ),
         )
 

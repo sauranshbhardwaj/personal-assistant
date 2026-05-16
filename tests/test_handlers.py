@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 from app.handlers import HELP_TEXT, MessageHandler
 from app.models import DailyGoal, MealLog, PendingConfirmation, Reminder, ReminderEvent
+from app.reminder_catalog import OMEGA3_NAME, OMEGA3_REMINDER_MESSAGE
 
 
 CHAT_ID = "123456789"
@@ -162,6 +163,7 @@ def test_help_command_lists_available_commands(db_session, fake_telegram, settin
     assert "SNOOZE 10" in response
     assert "SNOOZE 30" in response
     assert "Log meal 650 calories 45g protein" in response
+    assert "Log breakfast/lunch/snack/dinner 650 calories 45g protein" in response
 
 
 def test_unknown_message_gets_helpful_fallback(db_session, fake_telegram, settings) -> None:
@@ -183,6 +185,52 @@ def test_meal_and_goal_commands_store_records(db_session, fake_telegram, setting
     assert goal_response == "Set goal: 2000 calories, 170g protein."
     assert db_session.query(MealLog).count() == 1
     assert db_session.query(DailyGoal).count() == 1
+
+
+def test_lunch_logging_triggers_omega3(db_session, fake_telegram, settings) -> None:
+    _create_omega3_reminder(db_session)
+    handler = make_handler(db_session, fake_telegram, settings)
+
+    response = handler.handle_inbound_message(CHAT_ID, "Log lunch 650 calories 45g protein")
+
+    event = db_session.query(ReminderEvent).one()
+    meal = db_session.query(MealLog).one()
+    assert meal.meal_type == "lunch"
+    assert event.status == "sent"
+    assert event.sent_at is not None
+    assert response == OMEGA3_REMINDER_MESSAGE
+    assert fake_telegram.sent[-2] == (CHAT_ID, "Logged lunch: 650 calories, 45g protein.")
+    assert fake_telegram.sent[-1] == (CHAT_ID, OMEGA3_REMINDER_MESSAGE)
+
+
+def test_non_lunch_meal_logs_do_not_trigger_omega3(db_session, fake_telegram, settings) -> None:
+    _create_omega3_reminder(db_session)
+    handler = make_handler(db_session, fake_telegram, settings)
+
+    response = handler.handle_inbound_message(CHAT_ID, "Log breakfast 500 calories 35g protein")
+
+    assert response == "Logged breakfast: 500 calories, 35g protein."
+    assert db_session.query(MealLog).count() == 1
+    assert db_session.query(ReminderEvent).count() == 0
+    assert fake_telegram.sent[-1] == (CHAT_ID, "Logged breakfast: 500 calories, 35g protein.")
+
+
+def test_duplicate_lunch_logs_do_not_create_duplicate_omega3_events(
+    db_session,
+    fake_telegram,
+    settings,
+) -> None:
+    _create_omega3_reminder(db_session)
+    handler = make_handler(db_session, fake_telegram, settings)
+
+    first_response = handler.handle_inbound_message(CHAT_ID, "Lunch: 650 calories, 45g protein")
+    second_response = handler.handle_inbound_message(CHAT_ID, "Log lunch 300 calories 25g protein")
+
+    assert first_response == OMEGA3_REMINDER_MESSAGE
+    assert second_response == "Logged lunch: 300 calories, 25g protein."
+    assert db_session.query(MealLog).count() == 2
+    assert db_session.query(ReminderEvent).count() == 1
+    assert [body for _, body in fake_telegram.sent].count(OMEGA3_REMINDER_MESSAGE) == 1
 
 
 def _create_event(
@@ -218,3 +266,21 @@ def _create_event(
     db_session.commit()
     db_session.refresh(event)
     return event
+
+
+def _create_omega3_reminder(db_session) -> Reminder:
+    reminder = Reminder(
+        chat_id=CHAT_ID,
+        category="supplement",
+        name=OMEGA3_NAME,
+        dosage="1 tablet",
+        instructions="Take Omega 3 Tablet 1 tablet",
+        frequency="after lunch log",
+        times_json=json.dumps([]),
+        start_date=datetime.utcnow().date(),
+        status="active",
+    )
+    db_session.add(reminder)
+    db_session.commit()
+    db_session.refresh(reminder)
+    return reminder

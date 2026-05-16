@@ -13,6 +13,15 @@ from app.models import DailyGoal, MealLog, Reminder, ReminderEvent, utc_now
 from app.telegram_client import MessageClient, get_message_client, send_message_and_record
 
 EVENT_HORIZON_DAYS = 30
+WEEKDAYS = {
+    "monday": 0,
+    "tuesday": 1,
+    "wednesday": 2,
+    "thursday": 3,
+    "friday": 4,
+    "saturday": 5,
+    "sunday": 6,
+}
 
 
 def create_reminder_events(
@@ -39,6 +48,9 @@ def create_reminder_events(
     created = 0
     current = start
     while current <= end:
+        if not _date_matches_frequency(reminder.frequency, current):
+            current += timedelta(days=1)
+            continue
         for local_time in times:
             local_dt = datetime.combine(current, local_time, tzinfo=settings.timezone)
             scheduled_at = _to_utc_naive(local_dt)
@@ -160,7 +172,7 @@ def send_sunday_goal_prompt(
 
 
 def render_summary(db: Session, chat_id: str, settings: Settings) -> str:
-    start_utc, end_utc = _local_day_bounds(settings)
+    start_utc, end_utc = local_day_bounds(settings)
     done_events = _events_for_statuses(db, chat_id, start_utc, end_utc, ["done"])
     missed_events = _events_for_statuses(db, chat_id, start_utc, end_utc, ["missed"])
     calories, protein = _meal_totals(db, chat_id, start_utc, end_utc)
@@ -179,7 +191,7 @@ def render_summary(db: Session, chat_id: str, settings: Settings) -> str:
 
 
 def render_today_status(db: Session, chat_id: str, settings: Settings) -> str:
-    start_utc, end_utc = _local_day_bounds(settings)
+    start_utc, end_utc = local_day_bounds(settings)
     pending = _events_for_statuses(db, chat_id, start_utc, end_utc, ["pending"])
     sent = _events_for_statuses(db, chat_id, start_utc, end_utc, ["sent"])
     snoozed = _events_for_statuses(db, chat_id, start_utc, end_utc, ["snoozed"])
@@ -194,7 +206,7 @@ def render_today_status(db: Session, chat_id: str, settings: Settings) -> str:
 
 
 def build_today_payload(db: Session, chat_id: str, settings: Settings) -> dict:
-    start_utc, end_utc = _local_day_bounds(settings)
+    start_utc, end_utc = local_day_bounds(settings)
     calories, protein = _meal_totals(db, chat_id, start_utc, end_utc)
     return {
         "reminders": [
@@ -321,11 +333,23 @@ def _nudge_message(event: ReminderEvent) -> str:
     return f"Nudge {event.nudge_count + 1}: {_reminder_message(event)}"
 
 
-def _local_day_bounds(settings: Settings, target_date: date | None = None) -> tuple[datetime, datetime]:
+def local_day_bounds(settings: Settings, target_date: date | None = None) -> tuple[datetime, datetime]:
     local_date = target_date or datetime.now(settings.timezone).date()
     local_start = datetime.combine(local_date, time.min, tzinfo=settings.timezone)
     local_end = local_start + timedelta(days=1)
     return _to_utc_naive(local_start), _to_utc_naive(local_end)
+
+
+def _date_matches_frequency(frequency: str, local_date: date) -> bool:
+    normalized = frequency.lower().strip()
+    if not normalized.startswith("weekly "):
+        return True
+
+    weekday_name = normalized.removeprefix("weekly ").strip()
+    weekday = WEEKDAYS.get(weekday_name)
+    if weekday is None:
+        return True
+    return local_date.weekday() == weekday
 
 
 def _all_times_have_passed_today(times: list[time], now_local: datetime) -> bool:

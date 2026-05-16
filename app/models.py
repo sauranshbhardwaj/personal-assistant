@@ -69,6 +69,7 @@ class MealLog(Base):
 
     id = Column(Integer, primary_key=True)
     chat_id = Column(String(64), nullable=False, index=True)
+    meal_type = Column(String(32), nullable=True, index=True)
     calories = Column(Integer, nullable=False)
     protein_grams = Column(Integer, nullable=False)
     logged_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)

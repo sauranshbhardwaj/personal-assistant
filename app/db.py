@@ -31,6 +31,7 @@ def init_db() -> None:
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_local_sqlite_columns()
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -39,3 +40,16 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+
+def _ensure_local_sqlite_columns() -> None:
+    if not settings.database_url.startswith("sqlite"):
+        return
+
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(meal_logs)").fetchall()
+        }
+        if columns and "meal_type" not in columns:
+            connection.exec_driver_sql("ALTER TABLE meal_logs ADD COLUMN meal_type VARCHAR(32)")

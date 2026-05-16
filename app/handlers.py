@@ -12,9 +12,11 @@ from app.models import DailyGoal, MealLog, PendingConfirmation, Reminder, Remind
 from app.parser import parse_message
 from app.scheduler import (
     create_reminder_events,
+    local_day_bounds,
     render_summary,
     render_today_status,
 )
+from app.reminder_catalog import OMEGA3_NAME, OMEGA3_REMINDER_MESSAGE
 from app.schemas import ParsedReminder, schema_to_dict
 from app.telegram_client import MessageClient, record_inbound_message, send_message_and_record
 
@@ -29,6 +31,7 @@ HELP_TEXT = """Commands:
 - today
 - summary
 - Log meal 650 calories 45g protein
+- Log breakfast/lunch/snack/dinner 650 calories 45g protein
 - Set weekly goal 2000 calories 170g protein"""
 
 FALLBACK_TEXT = (
@@ -72,7 +75,12 @@ class MessageHandler:
 
         parsed = parse_message(normalized, today=datetime.now(self.settings.timezone).date())
         if parsed.kind == "meal_log" and parsed.meal_log:
-            return self._log_meal(chat_id, parsed.meal_log.calories, parsed.meal_log.protein_grams)
+            return self._log_meal(
+                chat_id,
+                parsed.meal_log.calories,
+                parsed.meal_log.protein_grams,
+                parsed.meal_log.meal_type,
+            )
         if parsed.kind == "daily_goal" and parsed.daily_goal:
             return self._set_goal(chat_id, parsed.daily_goal.calories, parsed.daily_goal.protein_grams)
         if parsed.kind == "reminder" and parsed.reminder:
@@ -160,16 +168,29 @@ class MessageHandler:
         self.db.commit()
         return self._reply(chat_id, f"Snoozed {event.reminder.name} for {minutes} minutes.")
 
-    def _log_meal(self, chat_id: str, calories: int, protein_grams: int) -> str:
+    def _log_meal(
+        self,
+        chat_id: str,
+        calories: int,
+        protein_grams: int,
+        meal_type: str,
+    ) -> str:
         self.db.add(
             MealLog(
                 chat_id=chat_id,
+                meal_type=meal_type,
                 calories=calories,
                 protein_grams=protein_grams,
             )
         )
         self.db.commit()
-        return self._reply(chat_id, f"Logged meal: {calories} calories, {protein_grams}g protein.")
+        meal_label = meal_type if meal_type != "meal" else "meal"
+        ack = self._reply(
+            chat_id,
+            f"Logged {meal_label}: {calories} calories, {protein_grams}g protein.",
+        )
+        omega3_message = self._trigger_omega3_for_lunch(chat_id, meal_type)
+        return omega3_message or ack
 
     def _set_goal(self, chat_id: str, calories: int, protein_grams: int) -> str:
         self.db.query(DailyGoal).filter(
@@ -221,6 +242,55 @@ class MessageHandler:
             )
             .first()
         )
+
+    def _trigger_omega3_for_lunch(self, chat_id: str, meal_type: str) -> str | None:
+        if meal_type != "lunch":
+            return None
+
+        now_utc = datetime.utcnow()
+        local_today = datetime.now(self.settings.timezone).date()
+        reminder = (
+            self.db.query(Reminder)
+            .filter(
+                Reminder.chat_id == chat_id,
+                Reminder.name == OMEGA3_NAME,
+                Reminder.status == "active",
+                Reminder.start_date <= local_today,
+                or_(Reminder.end_date.is_(None), Reminder.end_date >= local_today),
+            )
+            .order_by(Reminder.created_at.desc(), Reminder.id.desc())
+            .first()
+        )
+        if reminder is None:
+            return None
+
+        start_utc, end_utc = local_day_bounds(self.settings, local_today)
+        already_triggered = (
+            self.db.query(ReminderEvent)
+            .filter(
+                ReminderEvent.reminder_id == reminder.id,
+                ReminderEvent.scheduled_at >= start_utc,
+                ReminderEvent.scheduled_at < end_utc,
+            )
+            .first()
+        )
+        if already_triggered is not None:
+            return None
+
+        self.db.add(
+            ReminderEvent(
+                reminder_id=reminder.id,
+                chat_id=chat_id,
+                scheduled_at=now_utc,
+                due_at=now_utc,
+                sent_at=now_utc,
+                status="sent",
+                nudge_count=0,
+                last_nudged_at=now_utc,
+            )
+        )
+        self.db.commit()
+        return self._reply(chat_id, OMEGA3_REMINDER_MESSAGE)
 
 
 def _confirmation_text(reminder: ParsedReminder) -> str:
