@@ -27,6 +27,13 @@ class Settings:
     sunday_goal_prompt_hour: int = 18
     timezone_name: str = "America/New_York"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "database_url",
+            normalize_database_url(self.database_url),
+        )
+
     @property
     def timezone(self) -> ZoneInfo:
         return ZoneInfo(self.timezone_name)
@@ -48,3 +55,9 @@ def get_settings() -> Settings:
         sunday_goal_prompt_hour=_int_env("SUNDAY_GOAL_PROMPT_HOUR", 18),
         timezone_name=os.getenv("TIMEZONE", "America/New_York"),
     )
+
+
+def normalize_database_url(database_url: str) -> str:
+    if database_url.startswith("postgres://"):
+        return f"postgresql://{database_url.removeprefix('postgres://')}"
+    return database_url

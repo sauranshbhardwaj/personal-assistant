@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 
 from app.models import Reminder, ReminderEvent
-from app.scheduler import create_reminder_events, send_due_reminders
+from app.scheduler import create_reminder_events, create_scheduler, send_due_reminders
 
 
 CHAT_ID = "123456789"
@@ -62,6 +62,24 @@ def test_create_reminder_events_does_not_extend_past_finite_end_date(
     assert created == 13
     assert first_local.strftime("%Y-%m-%d %H:%M") == "2026-05-16 21:00"
     assert last_local.strftime("%Y-%m-%d %H:%M") == "2026-05-22 21:00"
+
+
+def test_scheduler_registers_expected_unique_jobs(settings, fake_telegram) -> None:
+    scheduler = create_scheduler(settings=settings, message_client=fake_telegram)
+
+    try:
+        job_ids = [job.id for job in scheduler.get_jobs()]
+    finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+
+    assert job_ids == [
+        "send-due-reminders",
+        "replenish-reminder-events",
+        "daily-summary",
+        "sunday-goal-prompt",
+    ]
+    assert len(job_ids) == len(set(job_ids))
 
 
 def _create_reminder(
