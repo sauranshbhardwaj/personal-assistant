@@ -16,6 +16,7 @@ This is a reminder-only system. It does not provide medical advice, dosage guida
 2. Install dependencies:
 
    ```bash
+   pip install -r requirements.txt
    pip install ".[dev]"
    ```
 
@@ -207,9 +208,41 @@ Railway can use `/health` as the service health check:
 curl https://YOUR_RAILWAY_PUBLIC_URL/health
 ```
 
+### Railway Environment Variables
+
+Add these variables to the FastAPI app service, not only to the Postgres service. Railway provides `PORT` automatically, so do not add `PORT` manually.
+
+Required FastAPI service variables:
+
+```text
+TELEGRAM_BOT_TOKEN=<YOUR_TELEGRAM_BOT_TOKEN_FROM_BOTFATHER>
+TELEGRAM_CHAT_ID=<YOUR_NUMERIC_TELEGRAM_CHAT_ID>
+DATABASE_URL=${{Postgres.DATABASE_URL}}
+```
+
+- `TELEGRAM_BOT_TOKEN` comes from BotFather after you create the bot.
+- `TELEGRAM_CHAT_ID` is the numeric chat id you used during local Telegram testing.
+- `DATABASE_URL` should use Railway reference variable syntax so the FastAPI service reads the Postgres connection string from the database service. If your Railway database service is named `PostgreSQL`, use `DATABASE_URL=${{PostgreSQL.DATABASE_URL}}` instead.
+
+Optional/defaulted FastAPI service variables:
+
+```text
+NUDGE_INTERVAL_MINUTES=15
+MAX_NUDGES=4
+DAILY_SUMMARY_HOUR=20
+SUNDAY_GOAL_PROMPT_HOUR=18
+```
+
+- `NUDGE_INTERVAL_MINUTES` controls how often sent reminders nudge before completion or skip.
+- `MAX_NUDGES` controls how many nudges are sent before an event becomes missed.
+- `DAILY_SUMMARY_HOUR` controls the daily summary send hour in the app timezone.
+- `SUNDAY_GOAL_PROMPT_HOUR` controls the Sunday weekly-goal prompt hour in the app timezone.
+- `TIMEZONE` is available for advanced use and defaults to `America/New_York`; you do not need to set it for the normal setup.
+
 ### What The Code Already Handles
 
 - FastAPI starts from `app.main:app`.
+- Railway installs production dependencies from `requirements.txt`; `pyproject.toml` also lists the same runtime dependencies.
 - `DATABASE_URL` controls the database connection.
 - SQLite remains the local fallback when `DATABASE_URL` is not set.
 - Railway-style `postgres://...` database URLs are normalized to `postgresql://...` for SQLAlchemy.
@@ -226,7 +259,7 @@ curl https://YOUR_RAILWAY_PUBLIC_URL/health
 
    ```bash
    cd /Users/sauranshbhardwaj/Documents/personal-assistant
-   git add README.md app pyproject.toml railway.json tests
+   git add README.md app pyproject.toml requirements.txt railway.json tests
    git commit -m "Prepare Telegram reminder bot for Railway"
    git push origin main
    ```
@@ -240,12 +273,14 @@ curl https://YOUR_RAILWAY_PUBLIC_URL/health
    ```text
    TELEGRAM_BOT_TOKEN=<YOUR_TELEGRAM_BOT_TOKEN>
    TELEGRAM_CHAT_ID=<YOUR_TELEGRAM_CHAT_ID>
-   DATABASE_URL=<RAILWAY_POSTGRES_DATABASE_URL>
+   DATABASE_URL=${{Postgres.DATABASE_URL}}
    NUDGE_INTERVAL_MINUTES=15
    MAX_NUDGES=4
    DAILY_SUMMARY_HOUR=20
    SUNDAY_GOAL_PROMPT_HOUR=18
    ```
+
+   If your Railway database service is named `PostgreSQL`, use `DATABASE_URL=${{PostgreSQL.DATABASE_URL}}` instead.
 
 7. Confirm Railway is using this start command if it does not pick up `railway.json`:
 
